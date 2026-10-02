@@ -1,51 +1,136 @@
 #!/usr/bin/env node
-import { writeFileSync } from "node:fs";
+import { realpathSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { parseArgs as nodeParseArgs } from "node:util";
 import { reviewRepository } from "./core.js";
+import type { ReportFormat } from "./types.js";
+import { InspectorError } from "./types.js";
 
-type Args = {
+export type CliArgs = {
   command: string;
   repositoryPath?: string;
   baseRef?: string;
-  format?: "markdown" | "json";
+  format: ReportFormat;
+  output: string;
+  timeoutMs?: number;
   validations: string[];
+  help: boolean;
 };
 
-function parseArgs(argv: string[]): Args {
-  const args: Args = { command: argv[0] ?? "", validations: [] };
-  for (let index = 1; index < argv.length; index++) {
-    const token = argv[index];
-    if (token === "--repo") {
-      args.repositoryPath = argv[++index]?.split(" ")[0];
-    } else if (token === "--base-ref") {
-      args.baseRef = argv[++index];
-    } else if (token === "--format") {
-      args.format = argv[++index] as Args["format"];
-    } else if (token === "--validate") {
-      args.validations.push(argv[++index]);
+export const USAGE = `Usage: inspector review --repo <path> [options]
+
+Options:
+  --repo <path>          Repository to inspect (required)
+  --base-ref <ref>       Base to diff against (default: origin/HEAD, main, or master)
+  --validate <command>   Validation command to run in the repo; repeatable
+  --format <fmt>         markdown (default) or json
+  --output <path>        Report file (default: review-report.md); use - for stdout
+  --timeout <ms>         Per-command timeout in milliseconds (default: 120000)
+  --help                 Show this help
+
+Exit codes: 0 all validations passed, 1 a validation did not pass, 2 usage or inspection error.`;
+
+/** Strict parsing: unknown flags, missing values and bad enums are errors, not surprises. */
+export function parseArgs(argv: string[]): CliArgs {
+  let parsed: ReturnType<typeof nodeParseArgs>;
+  try {
+    parsed = nodeParseArgs({
+      args: argv,
+      strict: true,
+      allowPositionals: true,
+      options: {
+        repo: { type: "string" },
+        "base-ref": { type: "string" },
+        validate: { type: "string", multiple: true },
+        format: { type: "string" },
+        output: { type: "string", default: "review-report.md" },
+        timeout: { type: "string" },
+        help: { type: "boolean", short: "h", default: false },
+      },
+    });
+  } catch (error) {
+    throw new InspectorError("BAD_REQUEST", error instanceof Error ? error.message : String(error));
+  }
+  const { values, positionals } = parsed;
+  const format = (values.format as string | undefined) ?? "markdown";
+  if (format !== "markdown" && format !== "json") {
+    throw new InspectorError("BAD_REQUEST", `--format must be markdown or json, got ${format}`);
+  }
+  let timeoutMs: number | undefined;
+  if (values.timeout !== undefined) {
+    timeoutMs = Number(values.timeout);
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new InspectorError("BAD_REQUEST", "--timeout must be a positive number of milliseconds");
     }
   }
-  return args;
+  return {
+    command: positionals[0] ?? "",
+    repositoryPath: values.repo as string | undefined,
+    baseRef: values["base-ref"] as string | undefined,
+    format,
+    output: values.output as string,
+    timeoutMs,
+    validations: (values.validate as string[] | undefined) ?? [],
+    help: Boolean(values.help),
+  };
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
+export async function main(argv: string[]): Promise<number> {
+  let args: CliArgs;
+  try {
+    args = parseArgs(argv);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    console.error(USAGE);
+    return 2;
+  }
+  if (args.help) {
+    console.log(USAGE);
+    return 0;
+  }
   if (args.command !== "review" || !args.repositoryPath) {
-    console.error("Usage: inspector review --repo <path> [--base-ref <ref>] [--validate <command>]");
-    process.exitCode = 1;
-    return;
+    console.error(USAGE);
+    return 2;
   }
 
-  const report = await reviewRepository({
-    repositoryPath: args.repositoryPath,
-    baseRef: args.baseRef,
-    validationCommands: args.validations,
-    format: args.format,
-  });
-  writeFileSync("review-report.md", report, "utf8");
-  console.log("Review report written to review-report.md");
+  try {
+    const result = await reviewRepository({
+      repositoryPath: args.repositoryPath,
+      baseRef: args.baseRef,
+      validationCommands: args.validations,
+      format: args.format,
+      validationTimeoutMs: args.timeoutMs,
+    });
+    if (args.output === "-") {
+      process.stdout.write(result.text);
+    } else {
+      writeFileSync(args.output, result.text, "utf8");
+    }
+    const { files, validations } = result.data.summary;
+    const target = args.output === "-" ? "stdout" : args.output;
+    // Summary goes to stderr so `--output -` keeps stdout clean for pipes.
+    console.error(
+      `${files.total} file(s) changed; validations: ${validations.passed} passed, ${validations.total - validations.passed} not passed -> ${target}`,
+    );
+    return result.data.summary.ok ? 0 : 1;
+  } catch (error) {
+    if (error instanceof InspectorError) {
+      console.error(`${error.code}: ${error.message}`);
+      return 2;
+    }
+    console.error("Fatal error:", error instanceof Error ? error.message : error);
+    return 2;
+  }
 }
 
-main().catch((error) => {
-  console.error("Fatal error:", error);
-  process.exitCode = 1;
-});
+function invokedDirectly(): boolean {
+  try {
+    return process.argv[1] !== undefined && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+}
+
+if (invokedDirectly()) {
+  process.exitCode = await main(process.argv.slice(2));
+}
