@@ -5,13 +5,13 @@
   "type": "module",
   "description": "A repository review tool with CLI and MCP interfaces.",
   "bin": {
-    "inspector": "./dist/cli.js"
+    "inspector": "./dist/src/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "inspector": "tsx src/cli.ts",
     "mcp-server": "tsx src/mcp-server.ts",
-    "test": "vitest run",
+    "test": "vitest run --dir test",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
