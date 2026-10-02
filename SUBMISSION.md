@@ -80,4 +80,4 @@ Next three: (1) a `tsconfig.build.json` with `rootDir: "src"` so tests never lan
 ## Approximate focused-work time
 
 - Start: 2026-10-02 09:46 PDT (clone, npm ci, baseline typecheck and test)
-- Finish: 2026-10-02 10:06 PDT
+- Finish: 2026-10-02 10:16 PDT
